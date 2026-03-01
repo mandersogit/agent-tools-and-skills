@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 
 link_item() {
