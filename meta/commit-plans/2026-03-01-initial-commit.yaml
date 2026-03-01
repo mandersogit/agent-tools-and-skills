@@ -1,0 +1,39 @@
+commits:
+  - message: |
+      feat: initial commit — agent skills, hooks, and tools
+
+      Shared and harness-specific skills for AI agent environments
+      (Claude Code, Cursor). Installed via per-harness symlink scripts.
+
+      Skills (shared):
+        - commit-plans: YAML-based git commit workflow
+        - reverse-engineer-claude-code: JS bundle extraction and analysis
+
+      Skills (Claude Code specific):
+        - claude-history: non-interactive conversation history CLI
+
+      Infrastructure:
+        - SessionStart hook exporting session env vars
+        - Keybindings (ctrl+j for newline)
+        - Install/uninstall scripts for Claude Code
+    files:
+      - .gitignore
+      - README.md
+      - scripts/install-claude.sh
+      - scripts/uninstall-claude.sh
+      - claude/hooks/export-session-env.sh
+      - claude/keybindings.json
+      - claude/skills/claude-history/SKILL.md
+      - claude/skills/claude-history/bin/claude-history
+      - claude/skills/claude-history/references/self-resolution-fallback.md
+      - skills/commit-plans/SKILL.md
+      - skills/commit-plans/bin/commit-helper
+      - skills/commit-plans/references/single-repo.md
+      - skills/commit-plans/references/dual-repo.md
+      - skills/commit-plans/references/agent-skills-and-tools.md
+      - skills/reverse-engineer-claude-code/SKILL.md
+      - skills/reverse-engineer-claude-code/extract-bundle
+      - meta/docs/2026-02-25-claude-code-best-practices.md
+      - meta/docs/2026-02-28-claude-code-rule-loading.md
+      - meta/docs/2026-03-01-claude-history-skill-design.md
+      - meta/commit-plans/2026-03-01-initial-commit.yaml
