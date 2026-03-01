@@ -1,0 +1,320 @@
+#!/bin/bash
+# -*- mode: python -*-
+# vim: set ft=python:
+# Polyglot bash/python: bash preamble sets up venv + deps, then exec's into Python.
+"true" '''\'
+WORK_DIR="/tmp/agent_tools_$(id -un)/render-rules"
+mkdir -p "$WORK_DIR"
+VENV_DIR="$WORK_DIR/local.venv"
+MARKER="$VENV_DIR/.deps-installed"
+
+SCRIPT_REAL="$(readlink -f "$0")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL")"; while [ ! -f "bin/auto-shebang" ] && [ "$PWD" != "/" ]; do cd ..; done; pwd)"
+AUTO_PYTHON="$REPO_ROOT/bin/auto-python"
+
+if [ ! -x "$AUTO_PYTHON" ]; then
+    echo "ERROR: auto-python not found at $AUTO_PYTHON" >&2
+    echo "Is the repo intact? See bin/ in the repo root." >&2
+    exit 1
+fi
+
+if [ ! -f "$MARKER" ]; then
+    echo "Setting up venv at $VENV_DIR ..." >&2
+    "$AUTO_PYTHON" -m venv "$VENV_DIR"
+    "$VENV_DIR/bin/pip" install -q click pyyaml jinja2
+    touch "$MARKER"
+    echo "Venv ready." >&2
+fi
+
+exec "$VENV_DIR/bin/python" "$0" "$@"
+'''
+"""render-rules: Render rule templates for AI agent harnesses.
+
+Discovers .rule.jinja templates from rules/ (generic) and skills/*/rules/
+(skill-specific) in the agent-skills-and-tools repo, renders them with
+Jinja2 using a YAML config file, and writes output to the target directory.
+
+Usage:
+    render-rules --config rules.yaml --harness claude --target project
+    render-rules --config rules.yaml --harness cursor --target user
+    render-rules --list
+"""
+
+# ruff: noqa: E402, UP036 (polyglot script: imports not at top, version guard intentional)
+
+import sys as _sys
+
+if _sys.version_info < (3, 11):
+    _sys.exit(
+        f"Error: render-rules requires Python 3.11+ (you have {_sys.version})\n"
+        f"Install a compatible Python in /opt/miniforge/envs/ and retry."
+    )
+
+import pathlib as _pathlib
+import typing as _typing
+
+import click as _click
+import jinja2 as _jinja2
+import yaml as _yaml
+
+
+_HARNESS_EXTENSIONS: dict[str, str] = {
+    "claude": ".md",
+    "cursor": ".mdc",
+}
+
+_HARNESS_USER_DIRS: dict[str, _pathlib.Path] = {
+    "claude": _pathlib.Path.home() / ".claude" / "rules",
+    "cursor": _pathlib.Path.home() / ".cursor" / "rules",
+}
+
+
+def _find_repo_root() -> _pathlib.Path:
+    """Find the agent-skills-and-tools repo root.
+
+    Walks up from this script's location to find the repo root
+    (the parent of skills/render-rules/bin/).
+    """
+    script_dir = _pathlib.Path(__file__).resolve().parent
+    # bin/ -> render-rules/ -> skills/ -> repo root
+    repo_root = script_dir.parent.parent.parent
+
+    # Follow symlinks: if this script is symlinked from ~/.claude/skills/,
+    # resolve to the actual repo location.
+    real_script = _pathlib.Path(__file__).resolve()
+    real_repo_root = real_script.parent.parent.parent.parent
+
+    if (real_repo_root / "rules").is_dir() or (real_repo_root / "skills").is_dir():
+        return real_repo_root
+    if (repo_root / "rules").is_dir() or (repo_root / "skills").is_dir():
+        return repo_root
+
+    _click.echo("ERROR: Cannot find repo root from script location.", err=True)
+    _sys.exit(1)
+
+
+def _discover_templates(repo_root: _pathlib.Path) -> dict[str, _pathlib.Path]:
+    """Discover all .rule.jinja templates in the repo.
+
+    Searches:
+      - rules/*.rule.jinja (generic rules)
+      - skills/*/rules/*.rule.jinja (skill-specific rules)
+
+    Returns:
+        Dict mapping rule name to template path.
+    """
+    templates: dict[str, _pathlib.Path] = {}
+
+    # Generic rules
+    rules_dir = repo_root / "rules"
+    if rules_dir.is_dir():
+        for tmpl in sorted(rules_dir.glob("*.rule.jinja")):
+            name = tmpl.name.removesuffix(".rule.jinja")
+            templates[name] = tmpl
+
+    # Skill-specific rules
+    skills_dir = repo_root / "skills"
+    if skills_dir.is_dir():
+        for skill_rules_dir in sorted(skills_dir.glob("*/rules")):
+            for tmpl in sorted(skill_rules_dir.glob("*.rule.jinja")):
+                name = tmpl.name.removesuffix(".rule.jinja")
+                if name in templates:
+                    _click.echo(
+                        f"WARNING: Duplicate rule name '{name}' — "
+                        f"{tmpl} shadows {templates[name]}",
+                        err=True,
+                    )
+                templates[name] = tmpl
+
+    return templates
+
+
+def _load_config(config_path: _pathlib.Path) -> dict[str, _typing.Any]:
+    """Load rules config from YAML file.
+
+    Expected format:
+        rules:
+          - co-design-mode
+          - warnings-as-errors
+        vars:
+          some_variable: value
+    """
+    with config_path.open() as f:
+        result = _yaml.safe_load(f)
+    if result is None:
+        return {"rules": [], "vars": {}}
+    if not isinstance(result, dict):
+        _click.echo(
+            f"ERROR: Config must be a YAML mapping, got {type(result).__name__}",
+            err=True,
+        )
+        _sys.exit(1)
+    return _typing.cast(dict[str, _typing.Any], result)
+
+
+def _render_template(
+    tmpl_path: _pathlib.Path,
+    harness: str,
+    variables: dict[str, _typing.Any],
+) -> str:
+    """Render a single .rule.jinja template.
+
+    Provides these variables to the template:
+      - harness: "claude" or "cursor"
+      - All keys from the config's vars section
+    """
+    env = _jinja2.Environment(
+        loader=_jinja2.FileSystemLoader(tmpl_path.parent),
+        keep_trailing_newline=True,
+        undefined=_jinja2.StrictUndefined,
+    )
+    template = env.get_template(tmpl_path.name)
+
+    context = {
+        "harness": harness,
+        **variables,
+    }
+    return template.render(context)
+
+
+def _resolve_target_dir(
+    harness: str,
+    target: str,
+    project_dir: _pathlib.Path | None,
+) -> _pathlib.Path:
+    """Resolve the output directory for rendered rules."""
+    if target == "user":
+        return _HARNESS_USER_DIRS[harness]
+    if target == "project":
+        if project_dir is None:
+            _click.echo(
+                "ERROR: --project-dir is required when --target is 'project'.",
+                err=True,
+            )
+            _sys.exit(1)
+        harness_dir = ".claude" if harness == "claude" else ".cursor"
+        return project_dir / harness_dir / "rules"
+    _click.echo(f"ERROR: Unknown target '{target}'.", err=True)
+    _sys.exit(1)
+
+
+@_click.group()
+def cli() -> None:
+    """Render rule templates for AI agent harnesses."""
+
+
+@cli.command("list")
+def list_rules() -> None:
+    """List all available rule templates."""
+    repo_root = _find_repo_root()
+    templates = _discover_templates(repo_root)
+
+    if not templates:
+        _click.echo("No rule templates found.")
+        return
+
+    _click.echo(f"Available rules ({len(templates)}):")
+    _click.echo()
+    for name, path in sorted(templates.items()):
+        rel = path.relative_to(repo_root)
+        _click.echo(f"  {name:30s} {rel}")
+
+
+@cli.command("render")
+@_click.option(
+    "--config", "-c",
+    required=True,
+    type=_click.Path(exists=True, path_type=_pathlib.Path),
+    help="YAML config file specifying rules and variables.",
+)
+@_click.option(
+    "--harness", "-h",
+    required=True,
+    type=_click.Choice(list(_HARNESS_EXTENSIONS.keys())),
+    help="Target harness (claude or cursor).",
+)
+@_click.option(
+    "--target", "-t",
+    required=True,
+    type=_click.Choice(["user", "project"]),
+    help="Install target: user-level or project-level.",
+)
+@_click.option(
+    "--project-dir", "-p",
+    type=_click.Path(exists=True, path_type=_pathlib.Path, file_okay=False),
+    help="Project directory (required when --target is 'project').",
+)
+@_click.option(
+    "--dry-run", "-n",
+    is_flag=True,
+    help="Show what would be written without writing.",
+)
+def render(
+    config: _pathlib.Path,
+    harness: str,
+    target: str,
+    project_dir: _pathlib.Path | None,
+    dry_run: bool,
+) -> None:
+    """Render rules from config to the target directory."""
+    repo_root = _find_repo_root()
+    all_templates = _discover_templates(repo_root)
+    cfg = _load_config(config)
+
+    rule_names: list[str] = cfg.get("rules", [])
+    variables: dict[str, _typing.Any] = cfg.get("vars", {})
+
+    if not rule_names:
+        _click.echo("No rules specified in config. Nothing to render.")
+        return
+
+    ext = _HARNESS_EXTENSIONS[harness]
+    out_dir = _resolve_target_dir(harness, target, project_dir)
+
+    if dry_run:
+        _click.echo(f"[DRY RUN] Would write to: {out_dir}")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    errors: list[str] = []
+    rendered = 0
+
+    for name in rule_names:
+        if name not in all_templates:
+            errors.append(f"Rule '{name}' not found in template catalog.")
+            continue
+
+        tmpl_path = all_templates[name]
+        try:
+            content = _render_template(tmpl_path, harness, variables)
+        except _jinja2.UndefinedError as e:
+            errors.append(f"Rule '{name}': missing variable — {e}")
+            continue
+        except _jinja2.TemplateError as e:
+            errors.append(f"Rule '{name}': template error — {e}")
+            continue
+
+        out_file = out_dir / f"{name}{ext}"
+
+        if dry_run:
+            _click.echo(f"  [DRY RUN] {out_file}")
+            _click.echo(f"    ({len(content)} chars, from {tmpl_path.relative_to(repo_root)})")
+        else:
+            out_file.write_text(content)
+            _click.echo(f"  wrote {out_file}")
+        rendered += 1
+
+    if errors:
+        _click.echo("", err=True)
+        _click.echo("Errors:", err=True)
+        for err in errors:
+            _click.echo(f"  {err}", err=True)
+
+    _click.echo("")
+    _click.echo(f"Rendered {rendered}/{len(rule_names)} rules.")
+    if errors:
+        _sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli()
