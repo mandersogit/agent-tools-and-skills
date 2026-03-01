@@ -1,0 +1,64 @@
+commits:
+  - message: |
+      feat: add render-rules skill with Jinja2 templating
+
+      Adds a new skill for rendering rule templates into harness-specific
+      rule files (.md for Claude Code, .mdc for Cursor). Templates use
+      Jinja2 with harness-conditional frontmatter and project variables.
+
+      Includes two initial rule templates: co-design-mode and
+      warnings-as-errors, ported from existing Cursor rules.
+    files:
+      - skills/render-rules/SKILL.md
+      - skills/render-rules/bin/render-rules
+      - rules/co-design-mode.rule.jinja
+      - rules/warnings-as-errors.rule.jinja
+
+  - message: |
+      refactor: move install scripts to scripts/claude/
+
+      Renames install-claude.sh to scripts/claude/install-skills.sh
+      to support future per-harness script grouping (install-rules.sh,
+      install-cursor-*.sh). Updates REPO_DIR path calculation.
+    files:
+      - scripts/claude/install-skills.sh
+      - scripts/claude/uninstall-skills.sh
+    deleted:
+      - scripts/install-claude.sh
+      - scripts/uninstall-claude.sh
+
+  - message: |
+      feat: integrate auto-shebang for cross-machine Python discovery
+
+      Vendors auto-shebang resolver at bin/ with per-machine interpreter
+      symlinks in meta/interpreters/. Replaces the hardcoded
+      /opt/miniforge/envs/py3-*/bin/python glob in all polyglot scripts
+      with auto-python resolution. Supports spark, rocinante, and
+      macOS environments.
+    files:
+      - bin/auto-shebang
+      - bin/auto-python
+      - meta/interpreters/auto-python-spark
+      - meta/interpreters/auto-python-rocinante
+      - meta/interpreters/auto-python-macos
+      - skills/commit-plans/bin/commit-helper
+      - skills/reverse-engineer-claude-code/extract-bundle
+
+  - message: |
+      docs: add design discussion documents and update project docs
+
+      Adds render-rules design record, auto-shebang integration plan,
+      commit-helper deficiencies backlog, and Cursor session design docs
+      (cursor support, enrichment hook, auto-shebang strategy). Updates
+      README and CLAUDE.md to reflect new script paths and auto-shebang
+      Python discovery.
+    files:
+      - README.md
+      - CLAUDE.md
+      - meta/docs/discussion/2026-03-01-render-rules-design.md
+      - meta/docs/discussion/2026-03-01-auto-shebang-integration.md
+      - meta/docs/discussion/2026-03-01-cursor-support.md
+      - meta/docs/discussion/2026-03-01-cursor-enrichment-hook.md
+      - meta/docs/discussion/2026-03-01-cursor-enrichment-hook-auto-shebang.md
+      - meta/docs/discussion/2026-03-01-commit-helper-deficiencies.md
+      - meta/commit-plans/2026-03-01-render-rules-and-auto-shebang.yaml
