@@ -7,28 +7,20 @@ WORK_DIR="/tmp/agent_tools_$(id -un)/claude-re"
 VENV_DIR="$WORK_DIR/local.venv"
 MARKER="$VENV_DIR/.deps-installed"
 
-# Find a Python interpreter
-find_python() {
-    for candidate in /opt/miniforge/envs/py3-*/bin/python; do
-        if [ -x "$candidate" ]; then
-            echo "$candidate"
-            return
-        fi
-    done
-    echo ""
-}
+SCRIPT_REAL="$(readlink -f "$0")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL")"; while [ ! -f "bin/auto-shebang" ] && [ "$PWD" != "/" ]; do cd ..; done; pwd)"
+AUTO_PYTHON="$REPO_ROOT/bin/auto-python"
 
-PY="$(find_python)"
-if [ -z "$PY" ]; then
-    echo "ERROR: No Python interpreter found in /opt/miniforge/envs/." >&2
-    echo "Set PYTHON_EXE to a Python 3.11+ interpreter and retry." >&2
+if [ ! -x "$AUTO_PYTHON" ]; then
+    echo "ERROR: auto-python not found at $AUTO_PYTHON" >&2
+    echo "Is the repo intact? See bin/ in the repo root." >&2
     exit 1
 fi
 
 mkdir -p "$WORK_DIR"
 if [ ! -f "$MARKER" ]; then
     echo "Setting up venv at $VENV_DIR ..." >&2
-    "$PY" -m venv "$VENV_DIR"
+    "$AUTO_PYTHON" -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install -q click jsbeautifier tree-sitter tree-sitter-javascript
     touch "$MARKER"
     echo "Venv ready." >&2

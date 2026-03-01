@@ -8,26 +8,19 @@ mkdir -p "$WORK_DIR"
 VENV_DIR="$WORK_DIR/local.venv"
 MARKER="$VENV_DIR/.deps-installed"
 
-find_python() {
-    for candidate in /opt/miniforge/envs/py3-*/bin/python; do
-        if [ -x "$candidate" ]; then
-            echo "$candidate"
-            return
-        fi
-    done
-    echo ""
-}
+SCRIPT_REAL="$(readlink -f "$0")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL")"; while [ ! -f "bin/auto-shebang" ] && [ "$PWD" != "/" ]; do cd ..; done; pwd)"
+AUTO_PYTHON="$REPO_ROOT/bin/auto-python"
 
-PY="$(find_python)"
-if [ -z "$PY" ]; then
-    echo "ERROR: No Python interpreter found in /opt/miniforge/envs/." >&2
-    echo "Set PYTHON_EXE to a Python 3.11+ interpreter and retry." >&2
+if [ ! -x "$AUTO_PYTHON" ]; then
+    echo "ERROR: auto-python not found at $AUTO_PYTHON" >&2
+    echo "Is the repo intact? See bin/ in the repo root." >&2
     exit 1
 fi
 
 if [ ! -f "$MARKER" ]; then
     echo "Setting up venv at $VENV_DIR ..." >&2
-    "$PY" -m venv "$VENV_DIR"
+    "$AUTO_PYTHON" -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install -q click pyyaml
     touch "$MARKER"
     echo "Venv ready." >&2
@@ -121,7 +114,7 @@ def _validate_files_exist(
     missing = []
     for f in files:
         path = repo_path / f
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             missing.append(f)
     return missing
 
