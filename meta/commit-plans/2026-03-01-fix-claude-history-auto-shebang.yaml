@@ -1,0 +1,10 @@
+commits:
+  - message: |
+      fix: update claude-history to use auto-shebang for Python discovery
+
+      Missed in the auto-shebang integration — claude-history lives in
+      claude/skills/ not skills/, so it was not updated with the other
+      three polyglot scripts.
+    files:
+      - claude/skills/claude-history/bin/claude-history
+      - meta/commit-plans/2026-03-01-fix-claude-history-auto-shebang.yaml
