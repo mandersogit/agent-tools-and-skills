@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changes", "tests", "risks", "followups"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Brief description of what was implemented and why"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "description"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": { "type": "string", "enum": ["add", "modify", "delete", "rename"] },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ran", "commands", "passed"],
+      "properties": {
+        "ran": { "type": "boolean" },
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "passed": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "followups": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "summary_markdown": {
+      "type": "string",
+      "description": "Human-readable Markdown summary suitable for output.md"
+    }
+  }
+}

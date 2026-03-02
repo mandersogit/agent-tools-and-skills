@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overall", "findings"],
+  "properties": {
+    "overall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["risk", "summary"],
+      "properties": {
+        "risk": { "type": "string", "enum": ["CRITICAL", "MODERATE", "LOW", "CLEAN"] },
+        "summary": { "type": "string" }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "details", "evidence", "recommendation"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["CRITICAL", "MODERATE", "LOW"] },
+          "title": { "type": "string" },
+          "details": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "recommendation": { "type": "string" }
+        }
+      }
+    }
+  }
+}
