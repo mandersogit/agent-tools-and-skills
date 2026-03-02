@@ -12,11 +12,17 @@ If `$ARGUMENTS` specifies a topic, investigate that topic. If empty, run the ext
 
 ## Quick Start
 
-The companion script handles extraction, parsing, classification, and beautification:
+The companion script `extract-bundle` is in the same directory as this SKILL.md. Find it:
 
 ```bash
-~/.claude/skills/reverse-engineer-claude-code/extract-bundle info
-~/.claude/skills/reverse-engineer-claude-code/extract-bundle extract
+find ~ -path '*/reverse-engineer-claude-code/extract-bundle' -type f 2>/dev/null | head -1
+```
+
+Then run it:
+
+```bash
+/path/to/extract-bundle info
+/path/to/extract-bundle extract
 ```
 
 The script is a polyglot bash/python file. On first run it creates a venv at `/tmp/agent_tools_$USER/claude-re/local.venv` with all dependencies (click, jsbeautifier, tree-sitter). Subsequent runs reuse it.

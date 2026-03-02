@@ -41,7 +41,7 @@ Usage:
 
 import os
 import re
-import sys
+import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -60,10 +60,10 @@ JS_LANG = ts.Language(tsjs.language())
 
 def find_binary() -> Path:
     """Locate the Claude Code binary."""
-    which = os.popen("which claude 2>/dev/null").read().strip()
-    if not which:
+    found = shutil.which("claude")
+    if not found:
         raise click.ClickException("'claude' not found on PATH")
-    return Path(os.path.realpath(which))
+    return Path(found).resolve()
 
 
 def extract_js_region(binary_path: Path) -> bytes:

@@ -27,7 +27,7 @@ This project uses YAML commit plans instead of direct `git commit`. The agent wr
 
 ## The Tool
 
-The binary is at `~/.claude/skills/commit-plans/bin/commit-helper`.
+The binary is at `bin/commit-helper` (relative to this skill directory).
 
 ```bash
 commit-helper plan.yaml                       # Preview (safe, always OK)
