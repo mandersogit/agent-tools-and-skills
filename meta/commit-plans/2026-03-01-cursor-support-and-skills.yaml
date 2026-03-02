@@ -1,0 +1,82 @@
+commits:
+  - message: |
+      feat: add agent-delegation skill for cross-harness task routing
+
+      Structured skill for delegating self-contained tasks to headless AI
+      agents (codex-cli, Claude Code) with model selection guidance and
+      JSON schema contracts for implementation results and review findings.
+    files:
+      - skills/agent-delegation/SKILL.md
+      - skills/agent-delegation/references/claude-code.md
+      - skills/agent-delegation/references/codex-cli.md
+      - skills/agent-delegation/references/model-selection.md
+      - skills/agent-delegation/schemas/impl_result.schema.json
+      - skills/agent-delegation/schemas/review_findings.schema.json
+
+  - message: |
+      feat: add Cursor transcript enrichment hook with install/uninstall scripts
+
+      Python hook that captures all 10 Cursor hook events and writes
+      Claude-Code-compatible enriched JSONL transcripts to
+      ~/.cursor/hooks/transcripts/<project>/. Includes polyglot bash/Python
+      install and uninstall scripts that merge entries into ~/.cursor/hooks.json.
+    files:
+      - cursor/hooks/enrich-transcript.py
+      - scripts/cursor/install-hooks.sh
+      - scripts/cursor/uninstall-hooks.sh
+
+  - message: |
+      feat: add unified agent-history skill
+
+      Forked from claude-history, supports three transcript formats:
+      Claude Code JSONL, enriched Cursor JSONL, and native Cursor JSONL.
+      Multi-root discovery, format auto-detection, normalization layer,
+      and dual env-var self-resolution (CLAUDE_SESSION_ID / CURSOR_SESSION_ID).
+    files:
+      - skills/agent-history/SKILL.md
+      - skills/agent-history/bin/agent-history
+
+  - message: |
+      fix: make skill docs portable by removing hardcoded paths
+
+      commit-plans SKILL.md referenced ~/.claude/skills/commit-plans/bin/
+      and reverse-engineer-claude-code SKILL.md referenced the same
+      ~/.claude/ prefix. Both now use relative paths or discovery so the
+      skills work wherever they're installed. extract-bundle also switches
+      from os.popen("which claude") to shutil.which().
+    files:
+      - skills/commit-plans/SKILL.md
+      - skills/reverse-engineer-claude-code/SKILL.md
+      - skills/reverse-engineer-claude-code/extract-bundle
+
+  - message: |
+      config: add project-local Cursor skill symlinks
+
+      Relative symlinks in .cursor/skills/ point to ../../skills/ so
+      Cursor discovers agent-history, commit-plans, render-rules, and
+      reverse-engineer-claude-code as project-local skills.
+    files:
+      - .cursor/skills/agent-history
+      - .cursor/skills/commit-plans
+      - .cursor/skills/render-rules
+      - .cursor/skills/reverse-engineer-claude-code
+
+  - message: |
+      docs: add design docs, test results, and project status
+
+      Discussion documents for the Cursor support effort: enrichment hook
+      design updates and live test results, auto-shebang flag-parsing issue,
+      rule template survey, agent-chain handoff, bundle extraction methodology,
+      claude-history self-resolution env-dir mismatch writeup, and the
+      consolidated workflow status tracker.
+    files:
+      - meta/docs/discussion/2026-03-01-cursor-enrichment-hook.md
+      - meta/docs/discussion/2026-03-01-auto-shebang-integration.md
+      - meta/docs/discussion/2026-03-01-enrichment-hook-first-test.md
+      - meta/docs/discussion/2026-03-01-auto-shebang-flag-parsing.md
+      - meta/docs/discussion/2026-03-01-handoff-from-agent-chain-session.md
+      - meta/docs/discussion/2026-03-01-rule-template-candidates.md
+      - meta/docs/2026-03-01-bundle-extraction-methodology.md
+      - claude/skills/claude-history/references/self-resolution-fallback.md
+      - workflow/2026-03-01-cursor-support-status.md
+      - meta/commit-plans/2026-03-01-cursor-support-and-skills.yaml

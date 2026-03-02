@@ -235,13 +235,18 @@ The project directory name is derived from `workspace_roots[0]` (available in ev
 
 The `sessionStart` hook can return `env: {"CURSOR_SESSION_ID": conversation_id}`. Per Cursor docs, session-scoped env vars from `sessionStart` are "available to all subsequent hook executions within that session."
 
-**Open question:** Do these env vars also propagate to the agent's shell commands (Bash tool calls)? If yes, `cursor-history get self` works identically to `claude-history get self`. If no, alternatives:
+**Finding from live testing (2026-03-01):** The `sessionStart` event does not reach the enrichment hook when it is the second entry in the `sessionStart` hooks array. The existing `transcript.py` (first entry) receives `sessionStart` and runs successfully. All other events (`afterAgentThought`, `preToolUse`, `postToolUse`, `beforeSubmitPrompt`, `afterAgentResponse`, `sessionEnd`) work correctly as second entries in their arrays. This appears to be Cursor-specific behavior where `sessionStart` only runs the first hook in the array, or has a shorter total timeout that doesn't accommodate two hooks.
 
-- The agent passes its conversation_id explicitly (it knows it from system prompt context).
-- The hook writes a session file (e.g. `/tmp/cursor-session-<workspace-hash>.id`) that the CLI reads, keyed by workspace root.
-- The `additional_context` return from `sessionStart` tells the agent its session ID directly.
+**Consequence:** `CURSOR_SESSION_ID` is never set, so `agent-history get self` doesn't work for Cursor sessions yet. The env propagation question (do `sessionStart` env vars reach agent shell commands?) also remains unanswered.
 
-This needs testing. The `env` approach is the cleanest.
+**Possible fixes:**
+
+- Reorder hooks: put enrichment hook first for `sessionStart` only.
+- Merge: have the enrichment hook also return `additional_context` (what `transcript.py` returns for `sessionStart`), and remove `transcript.py` from the `sessionStart` array.
+- File-based fallback: the hook writes a session file (e.g. `/tmp/cursor-session-<workspace-hash>.id`) that the CLI reads, keyed by workspace root.
+- Agent passes conversation_id explicitly (it knows it from system prompt context).
+
+**Testing needed:** Verify behavior on rocinante (direct macOS) and enterprise laptop. Test with enrichment hook as the sole/first `sessionStart` entry.
 
 ## Relationship to existing `transcript.py`
 
@@ -288,7 +293,7 @@ For full details, see [Auto-Shebang Strategy](2026-03-01-cursor-enrichment-hook-
 The `hooks.json` command invokes via auto-python:
 
 ```json
-"command": "/path/to/agent-skills-and-tools/auto-shebang/auto-python /path/to/hook-script.py"
+"command": "/path/to/agent-skills-and-tools/bin/auto-python /path/to/hook-script.py"
 ```
 
 ## Hook implementation sketch
@@ -320,8 +325,14 @@ This means the enrichment hook and history skill both operate on the remote mach
 
 ## Open questions
 
-1. Do `sessionStart` env vars propagate to agent shell commands? (Determines self-resolution approach.)
+1. ~~Do `sessionStart` env vars propagate to agent shell commands?~~ **Blocked:** `sessionStart` doesn't reach the enrichment hook (see Self-resolution section). Once the hook ordering is fixed, this still needs testing.
 2. Should `preCompact` events be captured? They're useful metadata about context window state but aren't conversational.
 3. What's the right truncation limit for tool output? 10KB? 50KB? Configurable?
-4. Should the hook also capture `subagentStart`/`subagentStop`? These would let the history skill show subagent boundaries, which is a feature Claude Code's transcripts don't have.
+4. ~~Should the hook also capture `subagentStart`/`subagentStop`?~~ **Resolved: yes.** The hook captures them. The history skill skips them during turn collapsing (no `message.role`).
 5. Should the enriched JSONL include `generation_id` (changes per user message) in addition to `sessionId` (stable per conversation)? This could help correlate entries within a single agent loop iteration.
+
+## Live test results
+
+See [Enrichment Hook — First Live Test Results](2026-03-01-enrichment-hook-first-test.md) for the full report from the first live test on spark.
+
+**Summary:** Event capture works for all events except `sessionStart`. Thinking blocks, tool calls, tool results, timestamps, model info, cross-project operation, and format fidelity all verified. The `agent-history` skill successfully reads enriched transcripts with full block-level detail.

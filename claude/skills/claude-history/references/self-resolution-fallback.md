@@ -7,6 +7,21 @@ This document describes fallback strategies for resolving `self` (the current se
 - The `SessionStart` hook is not configured (new machine, fresh install)
 - The hook failed silently (jq missing, CLAUDE_ENV_FILE not set, schema change)
 - Running on an older Claude Code version that doesn't support `SessionStart` hooks or `CLAUDE_ENV_FILE`
+- **Resumed into a pre-hook session** (see below)
+
+## Known issue: resumed sessions and env dir mismatch (v2.1.63)
+
+When Claude Code resumes a conversation, it creates a **new** session (e.g. `8cd8223a`) that wraps the **original** session (`524927bf`). The SessionStart hook fires for the new session and correctly writes exports to `~/.claude/session-env/8cd8223a.../sessionstart-hook-0.sh`. However, Claude Code injects environment variables into tool shells by reading from the **original** session's env dir (`~/.claude/session-env/524927bf.../`). If the original session predates the hook installation, that directory is empty — so no `CLAUDE_SESSION_*` variables reach the Bash tool environment, even though the hook ran and produced correct output.
+
+**How it works internally** (from source):
+1. Hook execution (`ASR` function) sets `CLAUDE_ENV_FILE = <data_dir>/session-env/<session_id>/sessionstart-hook-<N>.sh` and passes it to the hook process.
+2. The hook writes `export CLAUDE_SESSION_ID=...` etc. to that file.
+3. Later, `WDD` reads all `sessionstart-hook-*.sh` files from the session's env dir and combines them into the tool environment.
+4. On resume, step 1 uses the new wrapper session ID, but step 3 reads from the original session ID. The mismatch means the exports are written to one directory and read from another.
+
+**Impact:** Only affects sessions that started before the hook was installed, then were later resumed. Fresh sessions work correctly. This is a transient issue — once all pre-hook sessions age out, it won't recur.
+
+**Workaround:** Use `claude-history get 0` (most recent session by index) instead of `claude-history get self`.
 
 ## Fallback 1: `~/.claude/history.jsonl` lookup
 

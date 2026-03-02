@@ -1,7 +1,7 @@
 ---
 title: "Integrating auto-shebang into Python Interpreter Discovery"
 date: 2026-03-01
-status: in co-design
+status: implemented
 related: 2026-03-01-cursor-enrichment-hook-auto-shebang.md
 ---
 
