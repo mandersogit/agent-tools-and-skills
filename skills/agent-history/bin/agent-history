@@ -1,0 +1,730 @@
+#!/bin/bash
+# -*- mode: python -*-
+# vim: set ft=python:
+# Polyglot bash/python: bash preamble sets up venv + deps, then exec's into Python.
+"true" '''\'
+WORK_DIR="/tmp/agent_tools_$(id -un)/agent-history"
+mkdir -p "$WORK_DIR"
+VENV_DIR="$WORK_DIR/local.venv"
+MARKER="$VENV_DIR/.deps-installed"
+
+SCRIPT_REAL="$(readlink -f "$0")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_REAL")"; while [ ! -f "bin/auto-shebang" ] && [ "$PWD" != "/" ]; do cd ..; done; pwd)"
+AUTO_PYTHON="$REPO_ROOT/bin/auto-python"
+
+if [ ! -x "$AUTO_PYTHON" ]; then
+    echo "ERROR: auto-python not found at $AUTO_PYTHON" >&2
+    echo "Is the repo intact? See bin/ in the repo root." >&2
+    exit 1
+fi
+
+if [ ! -f "$MARKER" ]; then
+    echo "Setting up venv at $VENV_DIR ..." >&2
+    "$AUTO_PYTHON" -m venv "$VENV_DIR"
+    "$VENV_DIR/bin/pip" install -q click
+    touch "$MARKER"
+    echo "Venv ready." >&2
+fi
+
+exec "$VENV_DIR/bin/python" "$0" "$@"
+'''
+"""agent-history: Unified CLI for AI agent conversation history.
+
+Supports Claude Code, enriched Cursor, and native Cursor transcript formats.
+
+Usage:
+    agent-history sessions [-p PROJECT] [-n LIMIT] [--json]
+    agent-history get <session> [@SPEC] [-b] [--tools] [--thinking] [-n LINES] [--json]
+
+The @SPEC argument addresses turns and blocks using Python sequence syntax:
+    @5          turn 5 (all text)
+    @5,3        turn 5, block 3
+    @5,2:5      turn 5, blocks 2-4
+    @-1         last turn
+    @-1,-1      last block of last turn
+    @3:7        turns 3-6
+    @:          all turns (rendered)
+
+Without @SPEC, lists all turns in the session.
+With @SPEC, renders the addressed content.
+"""
+
+import json as _json
+import os as _os
+import re as _re
+import sys as _sys
+from datetime import datetime as _datetime
+from pathlib import Path as _Path
+from typing import NamedTuple as _NamedTuple
+
+import click as _click
+
+
+# ---------------------------------------------------------------------------
+# Transcript sources
+# ---------------------------------------------------------------------------
+
+class _TranscriptSource(_NamedTuple):
+    """A root directory containing transcript data, with its format type."""
+    root: _Path
+    format: str  # "claude-code", "enriched-cursor", "native-cursor"
+
+
+def _discover_sources() -> list[_TranscriptSource]:
+    """Find all transcript roots on this machine."""
+    sources: list[_TranscriptSource] = []
+    home = _Path.home()
+
+    # Claude Code: ~/.claude/projects/<project>/*.jsonl
+    cc_root = home / ".claude" / "projects"
+    if cc_root.is_dir():
+        sources.append(_TranscriptSource(cc_root, "claude-code"))
+
+    # Enriched Cursor: ~/.cursor/hooks/transcripts/<project>/*.enriched.jsonl
+    ec_root = home / ".cursor" / "hooks" / "transcripts"
+    if ec_root.is_dir():
+        sources.append(_TranscriptSource(ec_root, "enriched-cursor"))
+
+    # Native Cursor: ~/.cursor/projects/<project>/agent-transcripts/<uuid>/<uuid>.jsonl
+    nc_root = home / ".cursor" / "projects"
+    if nc_root.is_dir():
+        sources.append(_TranscriptSource(nc_root, "native-cursor"))
+
+    return sources
+
+
+# ---------------------------------------------------------------------------
+# Format detection and normalization
+# ---------------------------------------------------------------------------
+
+
+_ENRICHED_TYPES = frozenset({
+    "session_start", "session_end", "user_message", "assistant_message",
+    "thinking", "tool_use", "tool_result", "subagent_start", "subagent_stop",
+})
+
+
+def _detect_format(entries: list[dict]) -> str:
+    """Detect transcript format from entries.
+
+    Returns "claude-code", "enriched-cursor", or "native-cursor".
+    Scans up to 10 entries since Claude Code transcripts often start with
+    non-message entries (progress, file-history-snapshot).
+    """
+    if not entries:
+        return "native-cursor"
+
+    for entry in entries[:10]:
+        etype = entry.get("type", "")
+
+        if etype in _ENRICHED_TYPES:
+            return "enriched-cursor"
+
+        if entry.get("sessionId") and entry.get("timestamp"):
+            return "claude-code"
+
+    # No sessionId/timestamp found — check for native Cursor structure
+    for entry in entries[:5]:
+        if "role" in entry and "message" in entry and "sessionId" not in entry:
+            return "native-cursor"
+
+    return "native-cursor"
+
+
+def _normalize_entries(entries: list[dict], fmt: str) -> list[dict]:
+    """Normalize entries to the internal format (Claude Code style).
+
+    Claude Code and enriched Cursor already have message.role — pass through.
+    Native Cursor needs entry["role"] moved into entry["message"]["role"].
+    """
+    if fmt != "native-cursor":
+        return entries
+
+    normalized = []
+    for entry in entries:
+        role = entry.get("role")
+        msg = entry.get("message", {})
+        if role is None or not msg:
+            continue
+        norm = dict(entry)
+        norm["message"] = dict(msg)
+        norm["message"]["role"] = role
+        normalized.append(norm)
+    return normalized
+
+
+# ---------------------------------------------------------------------------
+# Spec parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_slice(s: str, length: int) -> list[int]:
+    """Parse a Python-style index or slice spec into concrete indices.
+
+    Supports: "5", "-1", "3:7", ":5", "5:", ":"
+    """
+    s = s.strip()
+    if ":" in s:
+        parts = s.split(":", 1)
+        start_s, stop_s = parts[0].strip(), parts[1].strip()
+        start = int(start_s) if start_s else None
+        stop = int(stop_s) if stop_s else None
+        return list(range(*slice(start, stop).indices(length)))
+    else:
+        idx = int(s)
+        if idx < 0:
+            idx += length
+        if idx < 0 or idx >= length:
+            raise IndexError(f"index {int(s)} out of range (length {length})")
+        return [idx]
+
+
+def _parse_spec(spec: str) -> tuple[str, str | None]:
+    """Parse @SPEC into (turn_spec, block_spec|None).
+
+    Examples: "@5" -> ("5", None), "@5,3" -> ("5", "3"), "@-1,-1" -> ("-1", "-1")
+    """
+    raw = spec.lstrip("@")
+    match = _re.match(r'^(-?\d+(?::-?\d*)?|:-?\d*|:)', raw)
+    if not match:
+        raise _click.ClickException(f"Invalid spec: {spec}")
+    turn_part = match.group(0)
+    rest = raw[len(turn_part):]
+    if rest.startswith(","):
+        block_part = rest[1:]
+        if not block_part:
+            raise _click.ClickException(f"Invalid spec: {spec} (empty block spec after comma)")
+        return turn_part, block_part
+    elif rest == "":
+        return turn_part, None
+    else:
+        raise _click.ClickException(f"Invalid spec: {spec}")
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+
+def _decode_project_dir(name: str) -> str:
+    """Convert a project dir name back to a human-readable path."""
+    parts = name.split("-")
+    if parts and parts[0] == "":
+        parts = parts[1:]
+    return "/" + "/".join(parts)
+
+
+def _find_project_dirs(query: str, sources: list[_TranscriptSource]) -> list[tuple[_Path, _TranscriptSource]]:
+    """Find project dirs matching a query across all sources."""
+    query_lower = query.lower()
+    results = []
+    for src in sources:
+        if not src.root.is_dir():
+            continue
+        for d in sorted(src.root.iterdir()):
+            if d.is_dir():
+                if query_lower in d.name.lower() or query_lower in _decode_project_dir(d.name).lower():
+                    results.append((d, src))
+    return results
+
+
+def _parse_session(path: _Path) -> list[dict]:
+    """Parse a JSONL session file into a list of entries."""
+    entries = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entries.append(_json.loads(line))
+    return entries
+
+
+def _is_real_user_message(entry: dict) -> bool:
+    """Check if a JSONL entry is a real user message (not a tool result)."""
+    msg = entry.get("message", {})
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") not in ("tool_result",)
+            for b in content
+        )
+    return False
+
+
+def _collapse_turns(entries: list[dict]) -> list[dict]:
+    """Collapse JSONL entries into logical turns.
+
+    Entries must be normalized (message.role present). A user turn starts at
+    a real user message; an assistant turn includes all tool calls and results
+    until the next real user message.
+    """
+    turns: list[dict] = []
+    current_blocks: list[dict] = []
+    current_role: str | None = None
+    current_ts: str | None = None
+
+    def _flush() -> None:
+        nonlocal current_role, current_blocks, current_ts
+        if current_role is None or not current_blocks:
+            return
+
+        text_chars = 0
+        tool_count = 0
+        preview = ""
+        for b in current_blocks:
+            btype = b.get("type", "")
+            if btype == "text":
+                text_chars += len(b.get("text", ""))
+                if not preview:
+                    preview = b.get("text", "")[:120].replace("\n", " ")
+            elif btype == "tool_use":
+                tool_count += 1
+
+        turns.append({
+            "role": current_role,
+            "timestamp": current_ts,
+            "blocks": current_blocks,
+            "preview": preview,
+            "tool_count": tool_count,
+            "text_chars": text_chars,
+            "block_count": len(current_blocks),
+        })
+        current_role = None
+        current_blocks = []
+        current_ts = None
+
+    for entry in entries:
+        etype = entry.get("type", "")
+        if etype in ("queue-operation", "summary", "custom-title",
+                      "session_start", "session_end",
+                      "subagent_start", "subagent_stop"):
+            continue
+
+        msg = entry.get("message", {})
+        role = msg.get("role")
+        if role is None:
+            continue
+
+        content = msg.get("content", "")
+        ts = entry.get("timestamp")
+
+        if role == "user" and _is_real_user_message(entry):
+            _flush()
+            current_role = "user"
+            current_ts = ts
+        elif role == "assistant" and current_role != "assistant":
+            _flush()
+            current_role = "assistant"
+            current_ts = ts
+
+        if isinstance(content, str):
+            current_blocks.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    current_blocks.append(block)
+
+    _flush()
+    return turns
+
+
+def _session_meta(path: _Path, turns: list[dict], fmt: str) -> dict:
+    """Extract metadata from a parsed session."""
+    mtime = _datetime.fromtimestamp(path.stat().st_mtime)
+
+    first_user = ""
+    for t in turns:
+        if t["role"] == "user":
+            first_user = t["preview"]
+            break
+
+    user_turns = sum(1 for t in turns if t["role"] == "user")
+    assistant_turns = sum(1 for t in turns if t["role"] == "assistant")
+
+    return {
+        "session_id": path.stem,
+        "modified": mtime.strftime("%Y-%m-%d %H:%M"),
+        "user_turns": user_turns,
+        "assistant_turns": assistant_turns,
+        "preview": first_user,
+        "path": str(path),
+        "format": fmt,
+    }
+
+
+def _collect_jsonl_files(sources: list[_TranscriptSource], project_dirs: list[tuple[_Path, _TranscriptSource]] | None = None) -> list[tuple[_Path, _TranscriptSource]]:
+    """Collect all JSONL transcript files from the given sources or project dirs."""
+    results: list[tuple[_Path, _TranscriptSource]] = []
+
+    if project_dirs is not None:
+        dirs_to_scan = project_dirs
+    else:
+        dirs_to_scan = []
+        for src in sources:
+            if not src.root.is_dir():
+                continue
+            for d in sorted(src.root.iterdir()):
+                if d.is_dir():
+                    dirs_to_scan.append((d, src))
+
+    for d, src in dirs_to_scan:
+        if src.format == "native-cursor":
+            # Native Cursor: <project>/agent-transcripts/<uuid>/<uuid>.jsonl
+            at_dir = d / "agent-transcripts"
+            if at_dir.is_dir():
+                for session_dir in at_dir.iterdir():
+                    if session_dir.is_dir():
+                        for jsonl in session_dir.glob("*.jsonl"):
+                            results.append((jsonl, src))
+        elif src.format == "enriched-cursor":
+            for jsonl in d.glob("*.enriched.jsonl"):
+                results.append((jsonl, src))
+        else:
+            # Claude Code: <project>/*.jsonl
+            for jsonl in d.glob("*.jsonl"):
+                results.append((jsonl, src))
+
+    return results
+
+
+def _resolve_session(session: str, project: str | None, sources: list[_TranscriptSource]) -> tuple[_Path, str]:
+    """Resolve a session identifier to a JSONL path and format.
+
+    Accepts: "self", full path, UUID, UUID prefix, or numeric index.
+    Returns (path, format_string).
+    """
+    if session == "self":
+        sid = _os.environ.get("CURSOR_SESSION_ID") or _os.environ.get("CLAUDE_SESSION_ID")
+        if not sid:
+            raise _click.ClickException(
+                "Cannot resolve 'self': no session ID in environment.\n"
+                "Neither CURSOR_SESSION_ID nor CLAUDE_SESSION_ID is set.\n"
+                "For Claude Code: ensure the SessionStart hook is configured.\n"
+                "For Cursor: ensure the enrichment hook is installed in hooks.json."
+            )
+        return _resolve_session(sid, project, sources)
+
+    candidate = _Path(session)
+    if candidate.is_file():
+        entries = _parse_session(candidate)
+        fmt = _detect_format(entries)
+        return candidate, fmt
+
+    if project:
+        pdirs = _find_project_dirs(project, sources)
+        if not pdirs:
+            raise _click.ClickException(f"No project matching '{project}'")
+    else:
+        pdirs = None
+
+    all_jsonl = _collect_jsonl_files(sources, pdirs)
+
+    # Numeric index (most-recent-first)
+    try:
+        idx = int(session)
+        all_jsonl.sort(key=lambda pair: pair[0].stat().st_mtime, reverse=True)
+        if idx < 0:
+            idx += len(all_jsonl)
+        if 0 <= idx < len(all_jsonl):
+            path, src = all_jsonl[idx]
+            return path, src.format
+        raise _click.ClickException(
+            f"Index {idx} out of range (0..{len(all_jsonl) - 1})"
+        )
+    except ValueError:
+        pass
+
+    # UUID or UUID prefix
+    for path, src in all_jsonl:
+        if path.stem == session or path.stem.startswith(session):
+            return path, src.format
+        # enriched files have .enriched before .jsonl — check without suffix
+        stem = path.stem
+        if stem.endswith(".enriched"):
+            stem = stem[:-9]
+        if stem == session or stem.startswith(session):
+            return path, src.format
+
+    raise _click.ClickException(f"Cannot resolve session '{session}'")
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_block(block: dict, tools: bool, thinking: bool) -> str | None:
+    """Render a single block to text. Returns None if filtered out."""
+    btype = block.get("type", "")
+    if btype == "text":
+        text = block.get("text", "")
+        return text if text else None
+    elif btype == "thinking":
+        if not thinking:
+            return None
+        return f"<thinking>\n{block.get('thinking', '')}\n</thinking>"
+    elif btype == "tool_use":
+        if not tools:
+            return None
+        name = block.get("name", "?")
+        inp = block.get("input", {})
+        return f"<tool_use name=\"{name}\">\n{_json.dumps(inp, indent=2)}\n</tool_use>"
+    elif btype == "tool_result":
+        if not tools:
+            return None
+        content = block.get("content", "")
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    content = c.get("text", "")
+                    break
+            else:
+                content = str(content)
+        return f"<tool_result>\n{content}\n</tool_result>"
+    return None
+
+
+def _block_summary(i: int, block: dict) -> str:
+    """One-line summary of a block for listing."""
+    btype = block.get("type", "")
+    if btype == "text":
+        text = block.get("text", "")
+        preview = text[:70].replace("\n", " ")
+        return f"{i:3d}  text         [{len(text):>6d} chars]  {preview}"
+    elif btype == "thinking":
+        text = block.get("thinking", "")
+        return f"{i:3d}  thinking     [{len(text):>6d} chars]"
+    elif btype == "tool_use":
+        name = block.get("name", "?")
+        inp = block.get("input", {})
+        inp_len = len(_json.dumps(inp))
+        return f"{i:3d}  tool_use     {name} [{inp_len} chars input]"
+    elif btype == "tool_result":
+        content = block.get("content", "")
+        if isinstance(content, list):
+            clen = sum(len(c.get("text", "")) for c in content if isinstance(c, dict))
+        elif isinstance(content, str):
+            clen = len(content)
+        else:
+            clen = len(str(content))
+        return f"{i:3d}  tool_result  [{clen:>6d} chars]"
+    else:
+        return f"{i:3d}  {btype}"
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+@_click.group(invoke_without_command=True)
+@_click.pass_context
+def cli(ctx: _click.Context) -> None:
+    """Unified agent history CLI — works with Claude Code and Cursor transcripts."""
+    if ctx.invoked_subcommand is None:
+        _click.echo(ctx.get_help())
+
+
+@cli.command("sessions")
+@_click.option("-p", "--project", default=None, help="Filter by project (substring match).")
+@_click.option("-n", "--limit", type=int, default=None, help="Limit number of results.")
+@_click.option("-s", "--source", default=None, type=_click.Choice(["claude", "cursor", "all"]), help="Filter by transcript source.")
+@_click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def cmd_sessions(project: str | None, limit: int | None, source: str | None, as_json: bool) -> None:
+    """List sessions, most recent first."""
+    all_sources = _discover_sources()
+    if source == "claude":
+        all_sources = [s for s in all_sources if s.format == "claude-code"]
+    elif source == "cursor":
+        all_sources = [s for s in all_sources if s.format in ("enriched-cursor", "native-cursor")]
+
+    if project:
+        pdirs = _find_project_dirs(project, all_sources)
+        if not pdirs:
+            available = set()
+            for src in all_sources:
+                if src.root.is_dir():
+                    for d in sorted(src.root.iterdir()):
+                        if d.is_dir():
+                            available.add(_decode_project_dir(d.name))
+            raise _click.ClickException(
+                f"No project matching '{project}'\nAvailable:\n" + "\n".join(f"  {a}" for a in sorted(available))
+            )
+    else:
+        pdirs = None
+
+    all_jsonl = _collect_jsonl_files(all_sources, pdirs)
+
+    sessions = []
+    for path, src in all_jsonl:
+        try:
+            entries = _parse_session(path)
+            fmt = _detect_format(entries) if src.format == "claude-code" else src.format
+            entries = _normalize_entries(entries, fmt)
+            turns = _collapse_turns(entries)
+            meta = _session_meta(path, turns, fmt)
+            meta["project"] = _decode_project_dir(path.parent.name) if src.format != "native-cursor" else _decode_project_dir(path.parent.parent.parent.name)
+            meta["source"] = src.format
+            sessions.append(meta)
+        except Exception:
+            continue
+
+    sessions.sort(key=lambda s: s["modified"], reverse=True)
+
+    if limit:
+        sessions = sessions[:limit]
+
+    if as_json:
+        _json.dump(sessions, _sys.stdout, indent=2)
+        _click.echo()
+    else:
+        for i, s in enumerate(sessions):
+            preview = s["preview"][:50] if s["preview"] else "(empty)"
+            src_tag = {"claude-code": "cc", "enriched-cursor": "ec", "native-cursor": "nc"}[s["source"]]
+            _click.echo(
+                f"{i:3d}  {s['modified']}  {src_tag}  "
+                f"u:{s['user_turns']:2d} a:{s['assistant_turns']:2d}  "
+                f"{s['session_id'][:8]}  {preview}"
+            )
+
+
+@cli.command("get")
+@_click.argument("session")
+@_click.argument("spec", default="")
+@_click.option("-p", "--project", default=None, help="Project filter.")
+@_click.option("-b", "--blocks", is_flag=True, help="List blocks instead of rendering.")
+@_click.option("-n", "--lines", type=int, default=None, help="Limit to first N lines.")
+@_click.option("--tools", is_flag=True, help="Include tool use/result blocks.")
+@_click.option("--thinking", is_flag=True, help="Include thinking blocks.")
+@_click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def cmd_get(
+    session: str,
+    spec: str,
+    project: str | None,
+    blocks: bool,
+    lines: int | None,
+    tools: bool,
+    thinking: bool,
+    as_json: bool,
+) -> None:
+    """Access turns and blocks in a session.
+
+    \b
+    Without @SPEC: list all turns.
+    With @SPEC:    render addressed content.
+
+    \b
+    Spec examples:
+        @5          turn 5
+        @5,3        turn 5, block 3
+        @5,2:5      turn 5, blocks 2-4
+        @-1         last turn
+        @-1,-1      last block of last turn
+        @3:7        turns 3-6
+    """
+    all_sources = _discover_sources()
+    path, fmt = _resolve_session(session, project, all_sources)
+    entries = _parse_session(path)
+    entries = _normalize_entries(entries, fmt)
+    turns = _collapse_turns(entries)
+
+    # No spec: list turns
+    if not spec:
+        if as_json:
+            out = []
+            for i, t in enumerate(turns):
+                out.append({
+                    "index": i,
+                    "role": t["role"],
+                    "block_count": t["block_count"],
+                    "text_chars": t["text_chars"],
+                    "tool_count": t["tool_count"],
+                    "preview": t["preview"][:120],
+                })
+            _json.dump(out, _sys.stdout, indent=2)
+            _click.echo()
+        else:
+            for i, t in enumerate(turns):
+                role = t["role"]
+                bc = t["block_count"]
+                tc = f" ({t['tool_count']} tools)" if t["tool_count"] > 0 else ""
+                chars = f"[{t['text_chars']} chars]" if t["text_chars"] > 0 else ""
+                preview = t["preview"][:70] if t["preview"] else ""
+                _click.echo(
+                    f"{i:3d}  {role:10s} [{bc:2d} blk]{tc:15s} {chars:14s} {preview}"
+                )
+        return
+
+    # Parse @SPEC
+    if not spec.startswith("@"):
+        raise _click.ClickException(f"Spec must start with @, got: {spec}")
+
+    turn_spec, block_spec = _parse_spec(spec)
+
+    try:
+        turn_indices = _parse_slice(turn_spec, len(turns))
+    except (ValueError, IndexError) as e:
+        raise _click.ClickException(f"Invalid turn spec '{turn_spec}': {e}") from None
+
+    # If -b flag and no block spec: list blocks for the addressed turns
+    if blocks and block_spec is None:
+        for ti in turn_indices:
+            t = turns[ti]
+            if len(turn_indices) > 1:
+                _click.echo(f"--- turn {ti} ({t['role']}) ---")
+            for bi, block in enumerate(t["blocks"]):
+                _click.echo(_block_summary(bi, block))
+        return
+
+    # Resolve block indices
+    for ti in turn_indices:
+        t = turns[ti]
+        target_blocks = t["blocks"]
+
+        if block_spec is not None:
+            try:
+                block_indices = _parse_slice(block_spec, len(target_blocks))
+            except (ValueError, IndexError) as e:
+                raise _click.ClickException(
+                    f"Invalid block spec '{block_spec}' for turn {ti} "
+                    f"({len(target_blocks)} blocks): {e}"
+                ) from None
+            target_blocks = [target_blocks[bi] for bi in block_indices]
+
+        if blocks:
+            if len(turn_indices) > 1:
+                _click.echo(f"--- turn {ti} ({t['role']}) ---")
+            for bi, block in zip(
+                block_indices if block_spec is not None else range(len(target_blocks)),
+                target_blocks,
+            ):
+                _click.echo(_block_summary(bi, block))
+        elif as_json:
+            out = []
+            for block in target_blocks:
+                out.append(block)
+            if len(turn_indices) == 1:
+                _json.dump(out, _sys.stdout, indent=2)
+            else:
+                _click.echo(f"--- turn {ti} ({t['role']}) ---")
+                _json.dump(out, _sys.stdout, indent=2)
+            _click.echo()
+        else:
+            if len(turn_indices) > 1:
+                _click.echo(f"--- turn {ti} ({t['role']}) ---")
+            parts: list[str] = []
+            for block in target_blocks:
+                rendered = _render_block(block, tools, thinking)
+                if rendered is not None:
+                    parts.append(rendered)
+            full_text = "\n".join(parts)
+            if lines:
+                _click.echo("\n".join(full_text.splitlines()[:lines]))
+            else:
+                _click.echo(full_text)
+
+
+if __name__ == "__main__":
+    cli()
